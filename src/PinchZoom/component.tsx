@@ -1,10 +1,10 @@
 import * as React from 'react';
 
-import { styleRoot, styleChild, styles } from './styles.css';
 import { Interaction, Point } from '../types';
 import { isTouch } from '../utils';
-import { AnimateOptions, ScaleToOptions, Props, DefaultProps } from './types';
 import { getOffsetBounds } from './getOffsetBounds';
+import { styleChild, styleRoot, styles } from './styles.css';
+import { AnimateOptions, DefaultProps, Props, ScaleToOptions } from './types';
 
 const classnames = (base: string, other?: string): string =>
   other ? `${base} ${other}` : base;
@@ -138,13 +138,13 @@ class PinchZoom extends React.Component<Props> {
     _document: isSsr ? null : window.document,
   };
 
-  private _velocity: Point | null;
+  private _velocity: Point | null = null;
   private _prevDragMovePoint: Point | null = null;
   private _containerObserver: any | null = null;
   private _fingers: number = 0;
   private _firstMove: boolean = true;
-  private _hasInteraction: boolean;
-  private _inAnimation: boolean;
+  private _hasInteraction: boolean = false;
+  private _inAnimation: boolean = false;
   private _initialOffset: Point = { ...zeroPoint };
   private _interaction: Interaction | null = null;
   private _isDoubleTap: boolean = false;
@@ -169,6 +169,28 @@ class PinchZoom extends React.Component<Props> {
   private _containerRef: {
     readonly current: HTMLDivElement;
   } = React.createRef<HTMLDivElement>();
+
+  private _childRef: ((el: React.ReactInstance) => void) & { current: Element | null, existing: React.Ref<React.ReactInstance> } = Object.assign((el) => {
+    if (el && !(el instanceof Element)) {
+      console.error("Error: child must be an HTMLElement or use forwardRef to an HTMLElement");
+      this._childRef.current = null;
+      return;
+    }
+    if (el !== this._childRef.current) {
+      if (this._containerObserver && this._childRef.current) {
+        this._containerObserver.unobserve(this._childRef.current);
+      }
+      this._childRef.current = el;
+      if (this._containerObserver && this._childRef.current) {
+        this._containerObserver.observe(this._childRef.current);
+      }
+    }
+    if (typeof this._childRef.existing === 'function') {
+      this._childRef.existing(el);
+    } else if (this._childRef.existing) {
+      (this._childRef.existing as React.MutableRefObject<React.ReactInstance>).current = el;
+    }
+  }, { current: null, existing: null });
 
   private _handleClick = (clickEvent: Event) => {
     if (this._ignoreNextClick) {
@@ -418,7 +440,7 @@ class PinchZoom extends React.Component<Props> {
 
       this._zoomFactor = startZoomFactor + diffZoomFactor * progress;
       this._offset = this._sanitizeOffset({ x, y });
-      this._update();
+      this._update({ isAnimation: true });
     };
 
     this._animate(updateFrame, {
@@ -463,7 +485,7 @@ class PinchZoom extends React.Component<Props> {
       this._zoomFactor = startZoomFactor + diffZoomFactor * progress;
       this._offset = { x, y };
 
-      this._update();
+      this._update({ isAnimation: true });
     };
 
     this._animate(updateFrame, { callback: () => this._sanitize(), duration });
@@ -574,7 +596,7 @@ class PinchZoom extends React.Component<Props> {
       const y = startOffset.y + progress * (targetOffset.y - startOffset.y);
 
       this._offset = { x, y };
-      this._update();
+      //this._update();
     };
 
     this._animate(updateProgress);
@@ -691,8 +713,8 @@ class PinchZoom extends React.Component<Props> {
   private _updateInitialZoomFactor() {
     const rect = this._getContainerRect();
     const size = this._getChildSize();
-    const xZoomFactor = rect.width / size.width;
-    const yZoomFactor = rect.height / size.height;
+    const xZoomFactor = (rect.width - 2 * this.props.horizontalPadding) / size.width;
+    const yZoomFactor = (rect.height - 2 * this.props.verticalPadding) / size.height;
 
     this._initialZoomFactor = min(xZoomFactor, yZoomFactor);
   }
@@ -711,6 +733,9 @@ class PinchZoom extends React.Component<Props> {
     if (window.ResizeObserver) {
       this._containerObserver = new ResizeObserver(this._onResize);
       this._containerObserver.observe(div);
+      if (this._childRef.current) {
+        this._containerObserver.observe(this._childRef.current);
+      }
     } else {
       window.addEventListener('resize', this._onResize);
     }
@@ -753,7 +778,7 @@ class PinchZoom extends React.Component<Props> {
       const x = -this._offset.x / scale;
       const y = -this._offset.y / scale;
 
-      this.props.onUpdate({ scale, x, y });
+      this.props.onUpdate({ scale, x, y, isAnimation: options?.isAnimation ?? false });
     };
 
     if (options?.isAnimation) {
@@ -985,18 +1010,32 @@ class PinchZoom extends React.Component<Props> {
     const center = this._getOffsetByFirstTouch(likeTouchEvent);
     const dScale = deltaY * scaleDelta;
 
+    if (this._wheelTimeOut === null) {
+      this.props.onZoomStart();
+    }
+
     this._stopAnimation();
     this._scaleTo(
-      this._zoomFactor - dScale / this.props.wheelScaleFactor,
+      this._zoomFactor * (1 - dScale / this.props.wheelScaleFactor),
       center,
     );
-    this._update();
+    this._update({ isAnimation: true });
 
-    clearTimeout(
-      // @ts-ignore
-      this._wheelTimeOut,
-    );
-    this._wheelTimeOut = setTimeout(() => this._sanitize(), 100);
+    if (this._wheelTimeOut !== null) {
+      clearTimeout(
+        // @ts-ignore
+        this._wheelTimeOut,
+      );
+    }
+    this._wheelTimeOut = setTimeout(() => {
+      this._wheelTimeOut = null;
+      //this._sanitize();
+      if (this._isInsaneOffset()) {
+        this._sanitizeOffsetAnimation();
+      }
+      this.props.onZoomEnd();
+      this._update();
+    }, 100);
   };
 
   // @ts-ignore
@@ -1037,6 +1076,7 @@ class PinchZoom extends React.Component<Props> {
     const { children, containerProps } = this.props;
     const child = React.Children.only(children);
     const props = containerProps || {};
+    this._childRef.existing = (child as any).ref;
 
     return (
       <>
@@ -1047,6 +1087,7 @@ class PinchZoom extends React.Component<Props> {
           className={classnames(styleRoot, props.className)}
         >
           {React.cloneElement(child, {
+            ref: this._childRef,
             className: classnames(styleChild, child.props.className),
           })}
         </div>

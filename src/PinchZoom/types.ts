@@ -59,11 +59,13 @@ export interface DefaultProps {
   doubleTapToggleZoom: boolean;
   isTouch: () => boolean;
 
+  childRef?: (el: HTMLElement) => void;
+
   _document: Document;
 }
 
 export interface RequiredProps {
-  onUpdate: (updateAction: UpdateAction) => void;
+  onUpdate: (updateAction: UpdateAction & { isAnimation: boolean }) => void;
   children: ReactElement;
 }
 
